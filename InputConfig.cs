@@ -1,5 +1,11 @@
 namespace RaylibGameFramework.Input;
 
+public enum InputDeviceFamily
+{
+    KeyboardMouse,
+    Gamepad
+}
+
 public sealed class InputConfig
 {
     public List<InputBinding> Bindings { get; init; } = [];

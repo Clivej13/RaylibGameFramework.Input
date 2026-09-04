@@ -33,6 +33,8 @@ public sealed class InputController
 
     public string? RebindingAction { get; private set; }
 
+    public InputDeviceFamily? RebindingDeviceFamily { get; private set; }
+
     public InputRebindResult? CompletedRebind { get; private set; }
 
     public bool IsDown(string action) => GetActionState(action).IsDown;
@@ -43,22 +45,46 @@ public sealed class InputController
 
     public float GetValue(string action) => GetActionState(action).Value;
 
+    public InputBinding? GetBinding(string action, InputDeviceFamily deviceFamily)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+        ValidateDeviceFamily(deviceFamily);
+
+        return _config.Bindings.FirstOrDefault(binding =>
+            string.Equals(binding.Action, action, StringComparison.OrdinalIgnoreCase)
+            && TryGetDeviceFamily(binding.Device, out InputDeviceFamily bindingFamily)
+            && bindingFamily == deviceFamily);
+    }
+
     public void BeginRebind(string action)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(action);
 
         RebindingAction = action;
+        RebindingDeviceFamily = null;
+        CompletedRebind = null;
+    }
+
+    public void BeginRebind(string action, InputDeviceFamily deviceFamily)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+        ValidateDeviceFamily(deviceFamily);
+
+        RebindingAction = action;
+        RebindingDeviceFamily = deviceFamily;
         CompletedRebind = null;
     }
 
     public void CancelRebind()
     {
         RebindingAction = null;
+        RebindingDeviceFamily = null;
         CompletedRebind = null;
     }
 
     /// <summary>
-    /// Replaces the first binding for the result's action, or adds one when the action is unbound.
+    /// Replaces the first binding for the result's action and device family, or adds one when that
+    /// family is unbound.
     /// </summary>
     public void ApplyRebind(InputRebindResult result)
     {
@@ -67,8 +93,12 @@ public sealed class InputController
         ArgumentException.ThrowIfNullOrWhiteSpace(result.Device);
         ArgumentException.ThrowIfNullOrWhiteSpace(result.Input);
 
+        bool hasDeviceFamily = TryGetDeviceFamily(result.Device, out InputDeviceFamily deviceFamily);
         int bindingIndex = _config.Bindings.FindIndex(binding =>
-            string.Equals(binding.Action, result.Action, StringComparison.OrdinalIgnoreCase));
+            string.Equals(binding.Action, result.Action, StringComparison.OrdinalIgnoreCase)
+            && hasDeviceFamily
+            && TryGetDeviceFamily(binding.Device, out InputDeviceFamily bindingFamily)
+            && bindingFamily == deviceFamily);
         var replacement = new InputBinding
         {
             Action = result.Action,
@@ -111,16 +141,31 @@ public sealed class InputController
 
     private void UpdateRebindCapture()
     {
-        if (!(TryGetKeyboardInput(out PhysicalInput input)
-            || TryGetMouseInput(out input)
-            || TryGetGamepadButtonInput(out input)
-            || TryGetGamepadAxisInput(out input)))
+        PhysicalInput input = default;
+        bool captured = RebindingDeviceFamily switch
+        {
+            InputDeviceFamily.KeyboardMouse =>
+                TryGetKeyboardInput(out input)
+                || TryGetMouseInput(out input),
+            InputDeviceFamily.Gamepad =>
+                TryGetGamepadButtonInput(out input)
+                || TryGetGamepadAxisInput(out input),
+            null =>
+                TryGetKeyboardInput(out input)
+                || TryGetMouseInput(out input)
+                || TryGetGamepadButtonInput(out input)
+                || TryGetGamepadAxisInput(out input),
+            _ => false
+        };
+
+        if (!captured)
         {
             return;
         }
 
         CompletedRebind = new InputRebindResult(RebindingAction!, input.Device, input.Input);
         RebindingAction = null;
+        RebindingDeviceFamily = null;
         LastPhysicalInputName = input.DisplayName;
         LastActionName = _bindings.GetValueOrDefault((input.Device, input.Input), "Unmapped");
     }
@@ -385,6 +430,34 @@ public sealed class InputController
         }
 
         return result.ToString();
+    }
+
+    private static bool TryGetDeviceFamily(string device, out InputDeviceFamily deviceFamily)
+    {
+        if (device.Equals("Keyboard", StringComparison.OrdinalIgnoreCase)
+            || device.Equals("Mouse", StringComparison.OrdinalIgnoreCase))
+        {
+            deviceFamily = InputDeviceFamily.KeyboardMouse;
+            return true;
+        }
+
+        if (device.Equals("GamepadButton", StringComparison.OrdinalIgnoreCase)
+            || device.Equals("GamepadAxis", StringComparison.OrdinalIgnoreCase))
+        {
+            deviceFamily = InputDeviceFamily.Gamepad;
+            return true;
+        }
+
+        deviceFamily = default;
+        return false;
+    }
+
+    private static void ValidateDeviceFamily(InputDeviceFamily deviceFamily)
+    {
+        if (deviceFamily is not InputDeviceFamily.KeyboardMouse and not InputDeviceFamily.Gamepad)
+        {
+            throw new ArgumentOutOfRangeException(nameof(deviceFamily));
+        }
     }
 
     private readonly record struct PhysicalInput(string Device, string Input, string DisplayName);
