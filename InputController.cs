@@ -11,6 +11,9 @@ public sealed class InputController
 
     private readonly Dictionary<(int Gamepad, GamepadAxis Axis), bool> _activeAxes = [];
     private readonly Dictionary<(string Device, string Input), string> _bindings;
+    private readonly List<ConfiguredBinding> _configuredBindings = [];
+    private readonly Dictionary<string, InputActionState> _actionStates =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public InputController(InputConfig config)
     {
@@ -24,6 +27,8 @@ public sealed class InputController
                 && !string.IsNullOrWhiteSpace(binding.Action))
             {
                 _bindings[(binding.Device, binding.Input)] = binding.Action;
+                _configuredBindings.Add(new ConfiguredBinding(binding.Device, binding.Input, binding.Action));
+                _actionStates.TryAdd(binding.Action, default);
             }
         }
     }
@@ -32,8 +37,18 @@ public sealed class InputController
 
     public string LastActionName { get; private set; } = "Unmapped";
 
+    public bool IsDown(string action) => GetActionState(action).IsDown;
+
+    public bool WasPressed(string action) => GetActionState(action).WasPressed;
+
+    public bool WasReleased(string action) => GetActionState(action).WasReleased;
+
+    public float GetValue(string action) => GetActionState(action).Value;
+
     public void Update()
     {
+        UpdateActionStates();
+
         if (TryGetKeyboardInput(out PhysicalInput input)
             || TryGetMouseInput(out input)
             || TryGetGamepadButtonInput(out input)
@@ -42,6 +57,125 @@ public sealed class InputController
             LastPhysicalInputName = input.DisplayName;
             LastActionName = _bindings.GetValueOrDefault((input.Device, input.Input), "Unmapped");
         }
+    }
+
+    private InputActionState GetActionState(string action)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+        return _actionStates.GetValueOrDefault(action);
+    }
+
+    private void UpdateActionStates()
+    {
+        var values = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (ConfiguredBinding binding in _configuredBindings)
+        {
+            float value = GetBindingValue(binding);
+            if (Math.Abs(value) > Math.Abs(values.GetValueOrDefault(binding.Action)))
+            {
+                values[binding.Action] = value;
+            }
+        }
+
+        foreach (string action in _actionStates.Keys.ToArray())
+        {
+            InputActionState previous = _actionStates[action];
+            float value = values.GetValueOrDefault(action);
+            bool isDown = value != 0f;
+            _actionStates[action] = new InputActionState(
+                isDown,
+                !previous.IsDown && isDown,
+                previous.IsDown && !isDown,
+                value);
+        }
+    }
+
+    private static float GetBindingValue(ConfiguredBinding binding)
+    {
+        if (binding.Device.Equals("Keyboard", StringComparison.OrdinalIgnoreCase)
+            && Enum.TryParse(binding.Input, true, out KeyboardKey key)
+            && key != KeyboardKey.Null)
+        {
+            return Raylib.IsKeyDown(key) ? 1f : 0f;
+        }
+
+        if (binding.Device.Equals("Mouse", StringComparison.OrdinalIgnoreCase)
+            && Enum.TryParse(binding.Input, true, out MouseButton mouseButton))
+        {
+            return Raylib.IsMouseButtonDown(mouseButton) ? 1f : 0f;
+        }
+
+        if (binding.Device.Equals("GamepadButton", StringComparison.OrdinalIgnoreCase)
+            && Enum.TryParse(binding.Input, true, out GamepadButton gamepadButton)
+            && gamepadButton != GamepadButton.Unknown)
+        {
+            for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
+            {
+                if (Raylib.IsGamepadAvailable(gamepad)
+                    && Raylib.IsGamepadButtonDown(gamepad, gamepadButton))
+                {
+                    return 1f;
+                }
+            }
+
+            return 0f;
+        }
+
+        if (binding.Device.Equals("GamepadAxis", StringComparison.OrdinalIgnoreCase)
+            && TryParseAxisInput(binding.Input, out GamepadAxis axis, out AxisDirection direction))
+        {
+            float strongestValue = 0f;
+
+            for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
+            {
+                if (!Raylib.IsGamepadAvailable(gamepad))
+                {
+                    continue;
+                }
+
+                float value = Raylib.GetGamepadAxisMovement(gamepad, axis);
+                bool isTrigger = axis is GamepadAxis.LeftTrigger or GamepadAxis.RightTrigger;
+                bool isActive = isTrigger
+                    ? value >= TriggerThreshold
+                    : direction == AxisDirection.Negative
+                        ? value <= -StickThreshold
+                        : value >= StickThreshold;
+
+                if (isActive && Math.Abs(value) > Math.Abs(strongestValue))
+                {
+                    strongestValue = value;
+                }
+            }
+
+            return strongestValue;
+        }
+
+        return 0f;
+    }
+
+    private static bool TryParseAxisInput(
+        string input,
+        out GamepadAxis axis,
+        out AxisDirection direction)
+    {
+        if (input.EndsWith("Negative", StringComparison.OrdinalIgnoreCase))
+        {
+            direction = AxisDirection.Negative;
+            return Enum.TryParse(input[..^"Negative".Length], true, out axis)
+                && axis is not GamepadAxis.LeftTrigger and not GamepadAxis.RightTrigger;
+        }
+
+        if (input.EndsWith("Positive", StringComparison.OrdinalIgnoreCase))
+        {
+            direction = AxisDirection.Positive;
+            return Enum.TryParse(input[..^"Positive".Length], true, out axis)
+                && axis is not GamepadAxis.LeftTrigger and not GamepadAxis.RightTrigger;
+        }
+
+        direction = AxisDirection.Positive;
+        return Enum.TryParse(input, true, out axis)
+            && axis is GamepadAxis.LeftTrigger or GamepadAxis.RightTrigger;
     }
 
     private static bool TryGetKeyboardInput(out PhysicalInput input)
@@ -162,6 +296,20 @@ public sealed class InputController
     }
 
     private readonly record struct PhysicalInput(string Device, string Input, string DisplayName);
+
+    private readonly record struct ConfiguredBinding(string Device, string Input, string Action);
+
+    private readonly record struct InputActionState(
+        bool IsDown,
+        bool WasPressed,
+        bool WasReleased,
+        float Value);
+
+    private enum AxisDirection
+    {
+        Positive,
+        Negative
+    }
 
     private sealed class InputBindingKeyComparer : IEqualityComparer<(string Device, string Input)>
     {
