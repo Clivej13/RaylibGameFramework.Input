@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>RaylibGameFramework.Input</PackageId>
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
     <Description>Configurable keyboard, mouse, and gamepad input mapping for Raylib games.</Description>
   </PropertyGroup>
 

@@ -14,13 +14,123 @@ public sealed class InputController
     private readonly List<ConfiguredBinding> _configuredBindings = [];
     private readonly Dictionary<string, InputActionState> _actionStates =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly InputConfig _config;
 
     public InputController(InputConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
 
+        _config = config;
         _bindings = new Dictionary<(string Device, string Input), string>(InputBindingKeyComparer.Instance);
-        foreach (InputBinding binding in config.Bindings)
+        RebuildBindings();
+    }
+
+    public string LastPhysicalInputName { get; private set; } = "Press an input";
+
+    public string LastActionName { get; private set; } = "Unmapped";
+
+    public bool IsRebinding => RebindingAction is not null;
+
+    public string? RebindingAction { get; private set; }
+
+    public InputRebindResult? CompletedRebind { get; private set; }
+
+    public bool IsDown(string action) => GetActionState(action).IsDown;
+
+    public bool WasPressed(string action) => GetActionState(action).WasPressed;
+
+    public bool WasReleased(string action) => GetActionState(action).WasReleased;
+
+    public float GetValue(string action) => GetActionState(action).Value;
+
+    public void BeginRebind(string action)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+
+        RebindingAction = action;
+        CompletedRebind = null;
+    }
+
+    public void CancelRebind()
+    {
+        RebindingAction = null;
+        CompletedRebind = null;
+    }
+
+    /// <summary>
+    /// Replaces the first binding for the result's action, or adds one when the action is unbound.
+    /// </summary>
+    public void ApplyRebind(InputRebindResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentException.ThrowIfNullOrWhiteSpace(result.Action);
+        ArgumentException.ThrowIfNullOrWhiteSpace(result.Device);
+        ArgumentException.ThrowIfNullOrWhiteSpace(result.Input);
+
+        int bindingIndex = _config.Bindings.FindIndex(binding =>
+            string.Equals(binding.Action, result.Action, StringComparison.OrdinalIgnoreCase));
+        var replacement = new InputBinding
+        {
+            Action = result.Action,
+            Device = result.Device,
+            Input = result.Input
+        };
+
+        if (bindingIndex >= 0)
+        {
+            _config.Bindings[bindingIndex] = replacement;
+        }
+        else
+        {
+            _config.Bindings.Add(replacement);
+        }
+
+        RebuildBindings();
+    }
+
+    public void Update()
+    {
+        if (IsRebinding)
+        {
+            UpdateRebindCapture();
+            ResetActionStates();
+            return;
+        }
+
+        UpdateActionStates();
+
+        if (TryGetKeyboardInput(out PhysicalInput input)
+            || TryGetMouseInput(out input)
+            || TryGetGamepadButtonInput(out input)
+            || TryGetGamepadAxisInput(out input))
+        {
+            LastPhysicalInputName = input.DisplayName;
+            LastActionName = _bindings.GetValueOrDefault((input.Device, input.Input), "Unmapped");
+        }
+    }
+
+    private void UpdateRebindCapture()
+    {
+        if (!(TryGetKeyboardInput(out PhysicalInput input)
+            || TryGetMouseInput(out input)
+            || TryGetGamepadButtonInput(out input)
+            || TryGetGamepadAxisInput(out input)))
+        {
+            return;
+        }
+
+        CompletedRebind = new InputRebindResult(RebindingAction!, input.Device, input.Input);
+        RebindingAction = null;
+        LastPhysicalInputName = input.DisplayName;
+        LastActionName = _bindings.GetValueOrDefault((input.Device, input.Input), "Unmapped");
+    }
+
+    private void RebuildBindings()
+    {
+        _bindings.Clear();
+        _configuredBindings.Clear();
+
+        foreach (InputBinding binding in _config.Bindings)
         {
             if (!string.IsNullOrWhiteSpace(binding.Device)
                 && !string.IsNullOrWhiteSpace(binding.Input)
@@ -33,29 +143,11 @@ public sealed class InputController
         }
     }
 
-    public string LastPhysicalInputName { get; private set; } = "Press an input";
-
-    public string LastActionName { get; private set; } = "Unmapped";
-
-    public bool IsDown(string action) => GetActionState(action).IsDown;
-
-    public bool WasPressed(string action) => GetActionState(action).WasPressed;
-
-    public bool WasReleased(string action) => GetActionState(action).WasReleased;
-
-    public float GetValue(string action) => GetActionState(action).Value;
-
-    public void Update()
+    private void ResetActionStates()
     {
-        UpdateActionStates();
-
-        if (TryGetKeyboardInput(out PhysicalInput input)
-            || TryGetMouseInput(out input)
-            || TryGetGamepadButtonInput(out input)
-            || TryGetGamepadAxisInput(out input))
+        foreach (string action in _actionStates.Keys.ToArray())
         {
-            LastPhysicalInputName = input.DisplayName;
-            LastActionName = _bindings.GetValueOrDefault((input.Device, input.Input), "Unmapped");
+            _actionStates[action] = default;
         }
     }
 

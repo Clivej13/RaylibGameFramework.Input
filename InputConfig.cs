@@ -13,3 +13,5 @@ public sealed class InputBinding
 
     public string Action { get; init; } = string.Empty;
 }
+
+public sealed record InputRebindResult(string Action, string Device, string Input);
