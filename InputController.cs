@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Text;
 using Raylib_cs;
 
@@ -15,6 +16,7 @@ public sealed class InputController
     private readonly Dictionary<string, InputActionState> _actionStates =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly InputConfig _config;
+    private Vector2? _previousMousePosition;
 
     public InputController(InputConfig config)
     {
@@ -28,6 +30,9 @@ public sealed class InputController
     public string LastPhysicalInputName { get; private set; } = "Press an input";
 
     public string LastActionName { get; private set; } = "Unmapped";
+
+    /// <summary>The device family detected from meaningful physical input during Update.</summary>
+    public InputDeviceFamily ActiveDeviceFamily { get; private set; } = InputDeviceFamily.KeyboardMouse;
 
     public bool IsRebinding => RebindingAction is not null;
 
@@ -120,6 +125,8 @@ public sealed class InputController
 
     public void Update()
     {
+        UpdateActiveDeviceFamily();
+
         if (IsRebinding)
         {
             UpdateRebindCapture();
@@ -136,6 +143,49 @@ public sealed class InputController
         {
             LastPhysicalInputName = input.DisplayName;
             LastActionName = _bindings.GetValueOrDefault((input.Device, input.Input), "Unmapped");
+        }
+    }
+
+    private void UpdateActiveDeviceFamily()
+    {
+        Vector2 mousePosition = Raylib.GetMousePosition();
+        bool mouseMoved = _previousMousePosition is Vector2 previous && mousePosition != previous;
+        _previousMousePosition = mousePosition;
+
+        // Match the existing keyboard/mouse-first priority for simultaneous input.
+        if (TryGetKeyboardInput(out _)
+            || TryGetMouseInput(out _)
+            || mouseMoved
+            || Raylib.GetMouseWheelMoveV() != Vector2.Zero)
+        {
+            ActiveDeviceFamily = InputDeviceFamily.KeyboardMouse;
+            return;
+        }
+
+        if (TryGetGamepadButtonInput(out _))
+        {
+            ActiveDeviceFamily = InputDeviceFamily.Gamepad;
+            return;
+        }
+
+        // Poll independently so device detection never consumes rebind axis edges.
+        for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
+        {
+            if (!Raylib.IsGamepadAvailable(gamepad))
+            {
+                continue;
+            }
+
+            foreach (GamepadAxis axis in Enum.GetValues<GamepadAxis>())
+            {
+                float value = Raylib.GetGamepadAxisMovement(gamepad, axis);
+                bool isTrigger = axis is GamepadAxis.LeftTrigger or GamepadAxis.RightTrigger;
+                if (isTrigger ? value >= TriggerThreshold : Math.Abs(value) >= StickThreshold)
+                {
+                    ActiveDeviceFamily = InputDeviceFamily.Gamepad;
+                    return;
+                }
+            }
         }
     }
 
