@@ -4,6 +4,9 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <PackageId>RaylibGameFramework.Input</PackageId>
+    <Version>0.1.4</Version>
+    <Description>Configurable keyboard, mouse, and gamepad input mapping for Raylib games.</Description>
   </PropertyGroup>
 
   <ItemGroup>
