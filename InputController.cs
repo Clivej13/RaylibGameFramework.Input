@@ -9,6 +9,7 @@ public sealed class InputController
     private const int MaximumGamepads = 4;
     private const float StickThreshold = 0.5f;
     private const float TriggerThreshold = 0.5f;
+    private const float MouseAxisCaptureThreshold = 8f;
 
     private readonly Dictionary<(int Gamepad, GamepadAxis Axis), bool> _activeAxes = [];
     private readonly Dictionary<(string Device, string Input), string> _bindings;
@@ -17,6 +18,7 @@ public sealed class InputController
         new(StringComparer.OrdinalIgnoreCase);
     private readonly InputConfig _config;
     private Vector2? _previousMousePosition;
+    private Vector2 _mouseDelta;
 
     public InputController(InputConfig config)
     {
@@ -48,6 +50,8 @@ public sealed class InputController
 
     public bool WasReleased(string action) => GetActionState(action).WasReleased;
 
+    /// <summary>Returns the strongest binding value. Mouse axes return signed, unclamped
+    /// per-frame Raylib delta: left/up negative, right/down positive.</summary>
     public float GetValue(string action) => GetActionState(action).Value;
 
     public InputBinding? GetBinding(string action, InputDeviceFamily deviceFamily)
@@ -125,6 +129,7 @@ public sealed class InputController
 
     public void Update()
     {
+        _mouseDelta = Raylib.GetMouseDelta();
         UpdateActiveDeviceFamily();
 
         if (IsRebinding)
@@ -138,6 +143,7 @@ public sealed class InputController
 
         if (TryGetKeyboardInput(out PhysicalInput input)
             || TryGetMouseInput(out input)
+            || TryGetMouseAxisInput(out input)
             || TryGetGamepadButtonInput(out input)
             || TryGetGamepadAxisInput(out input))
         {
@@ -156,6 +162,7 @@ public sealed class InputController
         if (TryGetKeyboardInput(out _)
             || TryGetMouseInput(out _)
             || mouseMoved
+            || _mouseDelta != Vector2.Zero
             || Raylib.GetMouseWheelMoveV() != Vector2.Zero)
         {
             ActiveDeviceFamily = InputDeviceFamily.KeyboardMouse;
@@ -196,13 +203,15 @@ public sealed class InputController
         {
             InputDeviceFamily.KeyboardMouse =>
                 TryGetKeyboardInput(out input)
-                || TryGetMouseInput(out input),
+                || TryGetMouseInput(out input)
+                || TryGetMouseAxisInput(out input),
             InputDeviceFamily.Gamepad =>
                 TryGetGamepadButtonInput(out input)
                 || TryGetGamepadAxisInput(out input),
             null =>
                 TryGetKeyboardInput(out input)
                 || TryGetMouseInput(out input)
+                || TryGetMouseAxisInput(out input)
                 || TryGetGamepadButtonInput(out input)
                 || TryGetGamepadAxisInput(out input),
             _ => false
@@ -278,7 +287,7 @@ public sealed class InputController
         }
     }
 
-    private static float GetBindingValue(ConfiguredBinding binding)
+    private float GetBindingValue(ConfiguredBinding binding)
     {
         if (binding.Device.Equals("Keyboard", StringComparison.OrdinalIgnoreCase)
             && Enum.TryParse(binding.Input, true, out KeyboardKey key)
@@ -291,6 +300,18 @@ public sealed class InputController
             && Enum.TryParse(binding.Input, true, out MouseButton mouseButton))
         {
             return Raylib.IsMouseButtonDown(mouseButton) ? 1f : 0f;
+        }
+
+        if (binding.Device.Equals("MouseAxis", StringComparison.OrdinalIgnoreCase))
+        {
+            return binding.Input.ToUpperInvariant() switch
+            {
+                "MOUSEXNEGATIVE" => Math.Min(_mouseDelta.X, 0f),
+                "MOUSEXPOSITIVE" => Math.Max(_mouseDelta.X, 0f),
+                "MOUSEYNEGATIVE" => Math.Min(_mouseDelta.Y, 0f),
+                "MOUSEYPOSITIVE" => Math.Max(_mouseDelta.Y, 0f),
+                _ => 0f
+            };
         }
 
         if (binding.Device.Equals("GamepadButton", StringComparison.OrdinalIgnoreCase)
@@ -397,6 +418,47 @@ public sealed class InputController
         return false;
     }
 
+    private bool TryGetMouseAxisInput(out PhysicalInput input)
+    {
+        // Capture the dominant component; horizontal wins exact diagonal ties.
+        bool horizontal = Math.Abs(_mouseDelta.X) >= Math.Abs(_mouseDelta.Y);
+        float value = horizontal ? _mouseDelta.X : _mouseDelta.Y;
+        if (Math.Abs(value) >= MouseAxisCaptureThreshold)
+        {
+            string name = $"Mouse{(horizontal ? "X" : "Y")}{(value < 0f ? "Negative" : "Positive")}";
+            input = new PhysicalInput("MouseAxis", name, GetInputDisplayName("MouseAxis", name));
+            return true;
+        }
+
+        input = default;
+        return false;
+    }
+
+    /// <summary>Returns a friendly physical input name for configuration and rebind UI.</summary>
+    public static string GetInputDisplayName(string device, string input)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(device);
+        ArgumentException.ThrowIfNullOrWhiteSpace(input);
+
+        if (device.Equals("MouseAxis", StringComparison.OrdinalIgnoreCase))
+        {
+            return input.ToUpperInvariant() switch
+            {
+                "MOUSEXNEGATIVE" => "Mouse Left",
+                "MOUSEXPOSITIVE" => "Mouse Right",
+                "MOUSEYNEGATIVE" => "Mouse Up",
+                "MOUSEYPOSITIVE" => "Mouse Down",
+                _ => FriendlyName(input)
+            };
+        }
+
+        string prefix = device.Equals("Mouse", StringComparison.OrdinalIgnoreCase) ? "Mouse "
+            : device.Equals("GamepadButton", StringComparison.OrdinalIgnoreCase)
+                || device.Equals("GamepadAxis", StringComparison.OrdinalIgnoreCase) ? "Gamepad "
+            : string.Empty;
+        return prefix + FriendlyName(input);
+    }
+
     private static bool TryGetGamepadButtonInput(out PhysicalInput input)
     {
         for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
@@ -485,7 +547,8 @@ public sealed class InputController
     private static bool TryGetDeviceFamily(string device, out InputDeviceFamily deviceFamily)
     {
         if (device.Equals("Keyboard", StringComparison.OrdinalIgnoreCase)
-            || device.Equals("Mouse", StringComparison.OrdinalIgnoreCase))
+            || device.Equals("Mouse", StringComparison.OrdinalIgnoreCase)
+            || device.Equals("MouseAxis", StringComparison.OrdinalIgnoreCase))
         {
             deviceFamily = InputDeviceFamily.KeyboardMouse;
             return true;

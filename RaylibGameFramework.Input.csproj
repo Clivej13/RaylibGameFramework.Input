@@ -5,11 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>RaylibGameFramework.Input</PackageId>
-    <Version>0.1.4</Version>
+    <Version>0.1.5</Version>
     <Description>Configurable keyboard, mouse, and gamepad input mapping for Raylib games.</Description>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
     <PackageReference Include="Raylib-cs" Version="8.0.0" />
   </ItemGroup>
 
