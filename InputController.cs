@@ -19,6 +19,32 @@ public sealed class InputController
     private readonly InputConfig _config;
     private Vector2? _previousMousePosition;
     private Vector2 _mouseDelta;
+    private readonly Dictionary<string, float> _rawValues = new(StringComparer.OrdinalIgnoreCase);
+    public InputControllerOptions Options { get; private set; } = new();
+
+    /// <summary>Changes take effect on the next Update; existing action edges are preserved.</summary>
+    public void Configure(InputControllerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        Options = options;
+        _activeAxes.Clear();
+    }
+
+    public InputController(InputConfig config, InputControllerOptions options) : this(config)
+        => Configure(options);
+
+    /// <summary>Unthresholded signed stick components, normalized triggers, or unchanged mouse deltas.</summary>
+    public float GetRawValue(string action)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+        return _rawValues.GetValueOrDefault(action);
+    }
+
+    private bool Allows(InputDeviceFamily family) => Options.DeviceFamily is null || Options.DeviceFamily == family;
+    private bool IsAllowedGamepad(int gamepad) => Allows(InputDeviceFamily.Gamepad)
+        && (Options.GamepadIndex is null || Options.GamepadIndex == gamepad)
+        && Raylib.IsGamepadAvailable(gamepad);
 
     public InputController(InputConfig config)
     {
@@ -102,6 +128,7 @@ public sealed class InputController
         ArgumentException.ThrowIfNullOrWhiteSpace(result.Device);
         ArgumentException.ThrowIfNullOrWhiteSpace(result.Input);
 
+        ValidateBinding(new InputBinding { Action = result.Action, Device = result.Device, Input = result.Input });
         bool hasDeviceFamily = TryGetDeviceFamily(result.Device, out InputDeviceFamily deviceFamily);
         int bindingIndex = _config.Bindings.FindIndex(binding =>
             string.Equals(binding.Action, result.Action, StringComparison.OrdinalIgnoreCase)
@@ -129,6 +156,8 @@ public sealed class InputController
 
     public void Update()
     {
+        foreach (var key in _activeAxes.Keys.ToArray())
+            if (!IsAllowedGamepad(key.Gamepad)) _activeAxes.Remove(key);
         _mouseDelta = Raylib.GetMouseDelta();
         UpdateActiveDeviceFamily();
 
@@ -161,9 +190,9 @@ public sealed class InputController
         // Match the existing keyboard/mouse-first priority for simultaneous input.
         if (TryGetKeyboardInput(out _)
             || TryGetMouseInput(out _)
-            || mouseMoved
+            || (Allows(InputDeviceFamily.KeyboardMouse) && (mouseMoved
             || _mouseDelta != Vector2.Zero
-            || Raylib.GetMouseWheelMoveV() != Vector2.Zero)
+            || Raylib.GetMouseWheelMoveV() != Vector2.Zero)))
         {
             ActiveDeviceFamily = InputDeviceFamily.KeyboardMouse;
             return;
@@ -178,7 +207,7 @@ public sealed class InputController
         // Poll independently so device detection never consumes rebind axis edges.
         for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
         {
-            if (!Raylib.IsGamepadAvailable(gamepad))
+            if (!IsAllowedGamepad(gamepad))
             {
                 continue;
             }
@@ -231,6 +260,7 @@ public sealed class InputController
 
     private void RebuildBindings()
     {
+        ValidateConfig(_config);
         _bindings.Clear();
         _configuredBindings.Clear();
 
@@ -249,6 +279,7 @@ public sealed class InputController
 
     private void ResetActionStates()
     {
+        _rawValues.Clear();
         foreach (string action in _actionStates.Keys.ToArray())
         {
             _actionStates[action] = default;
@@ -263,10 +294,14 @@ public sealed class InputController
 
     private void UpdateActionStates()
     {
+        _rawValues.Clear();
         var values = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
 
         foreach (ConfiguredBinding binding in _configuredBindings)
         {
+            float raw = GetBindingValue(binding, raw: true);
+            if (Math.Abs(raw) > Math.Abs(_rawValues.GetValueOrDefault(binding.Action)))
+                _rawValues[binding.Action] = raw;
             float value = GetBindingValue(binding);
             if (Math.Abs(value) > Math.Abs(values.GetValueOrDefault(binding.Action)))
             {
@@ -287,8 +322,9 @@ public sealed class InputController
         }
     }
 
-    private float GetBindingValue(ConfiguredBinding binding)
+    private float GetBindingValue(ConfiguredBinding binding, bool raw = false)
     {
+        if (!TryGetDeviceFamily(binding.Device, out var family) || !Allows(family)) return 0f;
         if (binding.Device.Equals("Keyboard", StringComparison.OrdinalIgnoreCase)
             && Enum.TryParse(binding.Input, true, out KeyboardKey key)
             && key != KeyboardKey.Null)
@@ -320,7 +356,7 @@ public sealed class InputController
         {
             for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
             {
-                if (Raylib.IsGamepadAvailable(gamepad)
+                if (IsAllowedGamepad(gamepad)
                     && Raylib.IsGamepadButtonDown(gamepad, gamepadButton))
                 {
                     return 1f;
@@ -337,14 +373,19 @@ public sealed class InputController
 
             for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
             {
-                if (!Raylib.IsGamepadAvailable(gamepad))
+                if (!IsAllowedGamepad(gamepad))
                 {
                     continue;
                 }
 
                 float value = Raylib.GetGamepadAxisMovement(gamepad, axis);
                 bool isTrigger = axis is GamepadAxis.LeftTrigger or GamepadAxis.RightTrigger;
-                bool isActive = isTrigger
+                if (!float.IsFinite(value)) continue;
+                if (raw && isTrigger) value = Math.Clamp((value + 1f) / 2f, 0f, 1f);
+                else if (raw) value = Math.Clamp(value, -1f, 1f);
+                bool isActive = raw
+                    ? (isTrigger || (direction == AxisDirection.Negative ? value < 0 : value > 0))
+                    : isTrigger
                     ? value >= TriggerThreshold
                     : direction == AxisDirection.Negative
                         ? value <= -StickThreshold
@@ -371,14 +412,14 @@ public sealed class InputController
         {
             direction = AxisDirection.Negative;
             return Enum.TryParse(input[..^"Negative".Length], true, out axis)
-                && axis is not GamepadAxis.LeftTrigger and not GamepadAxis.RightTrigger;
+                && axis is GamepadAxis.LeftX or GamepadAxis.LeftY or GamepadAxis.RightX or GamepadAxis.RightY;
         }
 
         if (input.EndsWith("Positive", StringComparison.OrdinalIgnoreCase))
         {
             direction = AxisDirection.Positive;
             return Enum.TryParse(input[..^"Positive".Length], true, out axis)
-                && axis is not GamepadAxis.LeftTrigger and not GamepadAxis.RightTrigger;
+                && axis is GamepadAxis.LeftX or GamepadAxis.LeftY or GamepadAxis.RightX or GamepadAxis.RightY;
         }
 
         direction = AxisDirection.Positive;
@@ -386,8 +427,9 @@ public sealed class InputController
             && axis is GamepadAxis.LeftTrigger or GamepadAxis.RightTrigger;
     }
 
-    private static bool TryGetKeyboardInput(out PhysicalInput input)
+    private bool TryGetKeyboardInput(out PhysicalInput input)
     {
+        if (!Allows(InputDeviceFamily.KeyboardMouse)) { input = default; return false; }
         foreach (KeyboardKey key in Enum.GetValues<KeyboardKey>())
         {
             if (key != KeyboardKey.Null && Raylib.IsKeyPressed(key))
@@ -402,8 +444,9 @@ public sealed class InputController
         return false;
     }
 
-    private static bool TryGetMouseInput(out PhysicalInput input)
+    private bool TryGetMouseInput(out PhysicalInput input)
     {
+        if (!Allows(InputDeviceFamily.KeyboardMouse)) { input = default; return false; }
         foreach (MouseButton button in Enum.GetValues<MouseButton>())
         {
             if (Raylib.IsMouseButtonPressed(button))
@@ -420,6 +463,7 @@ public sealed class InputController
 
     private bool TryGetMouseAxisInput(out PhysicalInput input)
     {
+        if (!Allows(InputDeviceFamily.KeyboardMouse)) { input = default; return false; }
         // Capture the dominant component; horizontal wins exact diagonal ties.
         bool horizontal = Math.Abs(_mouseDelta.X) >= Math.Abs(_mouseDelta.Y);
         float value = horizontal ? _mouseDelta.X : _mouseDelta.Y;
@@ -459,11 +503,11 @@ public sealed class InputController
         return prefix + FriendlyName(input);
     }
 
-    private static bool TryGetGamepadButtonInput(out PhysicalInput input)
+    private bool TryGetGamepadButtonInput(out PhysicalInput input)
     {
         for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
         {
-            if (!Raylib.IsGamepadAvailable(gamepad))
+            if (!IsAllowedGamepad(gamepad))
             {
                 continue;
             }
@@ -490,7 +534,7 @@ public sealed class InputController
     {
         for (int gamepad = 0; gamepad < MaximumGamepads; gamepad++)
         {
-            if (!Raylib.IsGamepadAvailable(gamepad))
+            if (!IsAllowedGamepad(gamepad))
             {
                 continue;
             }
@@ -524,6 +568,34 @@ public sealed class InputController
 
         input = default;
         return false;
+    }
+
+
+    public static void ValidateConfig(InputConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        if (config.Bindings is null) throw new InvalidDataException("Bindings must be an array.");
+        foreach (var binding in config.Bindings) ValidateBinding(binding);
+    }
+
+    private static void ValidateBinding(InputBinding binding)
+    {
+        if (binding is null || string.IsNullOrWhiteSpace(binding.Action)
+            || string.IsNullOrWhiteSpace(binding.Device) || string.IsNullOrWhiteSpace(binding.Input))
+            throw new InvalidDataException("Bindings require Action, Device and Input.");
+        bool valid = binding.Device.ToUpperInvariant() switch
+        {
+            "KEYBOARD" => Enum.TryParse<KeyboardKey>(binding.Input, true, out var key)
+                && Enum.IsDefined(key) && key != KeyboardKey.Null,
+            "MOUSE" => Enum.TryParse<MouseButton>(binding.Input, true, out var mouse) && Enum.IsDefined(mouse),
+            "GAMEPADBUTTON" => Enum.TryParse<GamepadButton>(binding.Input, true, out var button)
+                && Enum.IsDefined(button) && button != GamepadButton.Unknown,
+            "GAMEPADAXIS" => TryParseAxisInput(binding.Input, out _, out _),
+            "MOUSEAXIS" => binding.Input.ToUpperInvariant() is
+                "MOUSEXNEGATIVE" or "MOUSEXPOSITIVE" or "MOUSEYNEGATIVE" or "MOUSEYPOSITIVE",
+            _ => false
+        };
+        if (!valid) throw new InvalidDataException($"Unsupported binding: {binding.Device}/{binding.Input}.");
     }
 
     private static string FriendlyName(string name)

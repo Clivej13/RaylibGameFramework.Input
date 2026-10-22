@@ -21,6 +21,7 @@ public static class InputConfigLoader
             throw new InvalidDataException($"Input configuration '{resolvedPath}' must contain a Bindings array.");
         }
 
+        InputController.ValidateConfig(config);
         return config;
     }
 }
